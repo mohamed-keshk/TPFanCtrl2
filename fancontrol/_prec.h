@@ -1,7 +1,7 @@
 //systemheaders in one file for using precompiled headers.
 
-// be compatible downto Windows Server 2003 SP1
-#define _WIN32_WINNT 0x0502
+// Match the supported Windows 10/11 target and Task Scheduler/WRL APIs.
+#define _WIN32_WINNT 0x0A00
 //only most neccessary things from windows
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

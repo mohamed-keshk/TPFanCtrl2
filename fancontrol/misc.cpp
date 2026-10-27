@@ -18,6 +18,169 @@
 #include "_prec.h"
 #include "tools.h"
 #include "fancontrol.h"
+#include <taskschd.h>
+#include <sddl.h>
+#include <comdef.h>
+#include <wrl/client.h>
+#include <string>
+#include <vector>
+#include <new>
+#include <memory>
+
+#pragma comment(lib, "taskschd.lib")
+#pragma comment(lib, "comsuppw.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
+#pragma comment(lib, "advapi32.lib")
+
+namespace {
+using Microsoft::WRL::ComPtr;
+
+struct StartupComApartment {
+	HRESULT result;
+	StartupComApartment() : result(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)) {}
+	~StartupComApartment() { if (SUCCEEDED(result)) CoUninitialize(); }
+};
+
+std::wstring EscapeTaskXml(const std::wstring& value) {
+	std::wstring escaped;
+	for (wchar_t ch : value) {
+		switch (ch) {
+		case L'&': escaped += L"&amp;"; break;
+		case L'<': escaped += L"&lt;"; break;
+		case L'>': escaped += L"&gt;"; break;
+		case L'\"': escaped += L"&quot;"; break;
+		case L'\'': escaped += L"&apos;"; break;
+		default: escaped += ch; break;
+		}
+	}
+	return escaped;
+}
+
+// Query (-1), remove (0), or create/update (1) this user's startup task.
+HRESULT StartupTask(int operation, bool& enabled) {
+	enabled = false;
+	try {
+		StartupComApartment apartment;
+		if (FAILED(apartment.result) && apartment.result != RPC_E_CHANGED_MODE)
+			return apartment.result;
+		HRESULT hr = CoInitializeSecurity(NULL, -1, NULL, NULL,
+			RPC_C_AUTHN_LEVEL_PKT_PRIVACY, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, 0, NULL);
+		if (FAILED(hr) && hr != RPC_E_TOO_LATE) return hr;
+
+		// Scope the task and logon trigger to the current Windows user.
+		HANDLE token = NULL;
+		if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+			return HRESULT_FROM_WIN32(GetLastError());
+		DWORD size = 0;
+		GetTokenInformation(token, TokenUser, NULL, 0, &size);
+		if (!size) {
+			DWORD error = GetLastError();
+			CloseHandle(token);
+			return HRESULT_FROM_WIN32(error);
+		}
+		// Allocate without throwing while the token handle is held.
+		std::unique_ptr<BYTE[]> user(new (std::nothrow) BYTE[size]);
+		if (!user) { CloseHandle(token); return E_OUTOFMEMORY; }
+		BOOL gotUser = GetTokenInformation(token, TokenUser, user.get(), size, &size);
+		DWORD error = GetLastError();
+		CloseHandle(token);
+		if (!gotUser) return HRESULT_FROM_WIN32(error);
+		LPWSTR sidText = NULL;
+		if (!ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(user.get())->User.Sid, &sidText))
+			return HRESULT_FROM_WIN32(GetLastError());
+		std::unique_ptr<wchar_t, decltype(&LocalFree)> sidOwner(sidText, &LocalFree);
+		_bstr_t sid(sidText);
+		std::wstring taskName = L"TPFanCtrl2-Startup-";
+		taskName += static_cast<const wchar_t*>(sid);
+
+		ComPtr<ITaskService> service;
+		hr = CoCreateInstance(CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER,
+			IID_PPV_ARGS(service.GetAddressOf()));
+		if (FAILED(hr)) return hr;
+		hr = service->Connect(_variant_t(), _variant_t(), _variant_t(), _variant_t());
+		if (FAILED(hr)) return hr;
+		ComPtr<ITaskFolder> folder;
+		hr = service->GetFolder(_bstr_t(L"\\"), folder.GetAddressOf());
+		if (FAILED(hr)) return hr;
+
+		if (operation == -1) {
+			ComPtr<IRegisteredTask> task;
+			hr = folder->GetTask(_bstr_t(taskName.c_str()), task.GetAddressOf());
+			if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) return S_OK;
+			if (FAILED(hr)) return hr;
+			VARIANT_BOOL taskEnabled = VARIANT_FALSE;
+			hr = task->get_Enabled(&taskEnabled);
+			enabled = SUCCEEDED(hr) && taskEnabled == VARIANT_TRUE;
+			return hr;
+		}
+		if (operation == 0) {
+			hr = folder->DeleteTask(_bstr_t(taskName.c_str()), 0);
+			return hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) ? S_OK : hr;
+		}
+
+		std::vector<wchar_t> path(32768);
+		DWORD length = GetModuleFileNameW(NULL, path.data(), static_cast<DWORD>(path.size()));
+		if (!length) return HRESULT_FROM_WIN32(GetLastError());
+		if (length >= path.size()) return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+		std::wstring executable(path.data(), length);
+		size_t slash = executable.find_last_of(L"\\/");
+		if (slash == std::wstring::npos) return E_INVALIDARG;
+		std::wstring xml =
+			L"<Task version=\"1.3\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">"
+			L"<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>" +
+			std::wstring(static_cast<const wchar_t*>(sid)) +
+			L"</UserId></LogonTrigger></Triggers><Principals><Principal id=\"User\"><UserId>" +
+			std::wstring(static_cast<const wchar_t*>(sid)) +
+			L"</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel>"
+			L"</Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"
+			L"<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
+			L"<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"
+			L"<StartWhenAvailable>true</StartWhenAvailable><Enabled>true</Enabled>"
+			L"<ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>"
+			L"<Actions Context=\"User\"><Exec><Command>" + EscapeTaskXml(executable) +
+			L"</Command><WorkingDirectory>" + EscapeTaskXml(executable.substr(0, slash + 1)) +
+			L"</WorkingDirectory></Exec></Actions></Task>";
+		ComPtr<IRegisteredTask> registeredTask;
+		hr = folder->RegisterTask(_bstr_t(taskName.c_str()), _bstr_t(xml.c_str()),
+			TASK_CREATE_OR_UPDATE, _variant_t(static_cast<const wchar_t*>(sid)), _variant_t(),
+			TASK_LOGON_INTERACTIVE_TOKEN, _variant_t(), registeredTask.GetAddressOf());
+		enabled = SUCCEEDED(hr);
+		return hr;
+	}
+	catch (const _com_error& error) { return error.Error(); }
+	catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+}
+}
+
+void FANCONTROL::RefreshStartupCheckbox() {
+	bool enabled = false;
+	HRESULT hr = StartupTask(-1, enabled);
+	::CheckDlgButton(this->hwndDialog, 8400,
+		FAILED(hr) ? BST_INDETERMINATE : (enabled ? BST_CHECKED : BST_UNCHECKED));
+	if (FAILED(hr)) {
+		char message[128];
+		sprintf_s(message, "Unable to read startup setting (0x%08lx).", static_cast<unsigned long>(hr));
+		this->Trace(message);
+	}
+}
+
+void FANCONTROL::SetStartupFromCheckbox() {
+	bool requested = ::IsDlgButtonChecked(this->hwndDialog, 8400) == BST_CHECKED;
+	bool enabled = false;
+	HRESULT hr = StartupTask(requested ? 1 : 0, enabled);
+	if (FAILED(hr)) {
+		char message[256];
+		sprintf_s(message, "Unable to change the startup setting (0x%08lx). Run TPFanControl as administrator and try again.",
+			static_cast<unsigned long>(hr));
+		this->Trace(message);
+		::MessageBox(this->hwndDialog, message, "TPFanControl", MB_OK | MB_ICONERROR);
+	}
+	else {
+		this->Trace(requested ? "Startup enabled for this Windows user." : "Startup disabled for this Windows user.");
+	}
+	this->RefreshStartupCheckbox();
+}
 
 
 //-------------------------------------------------------------------------

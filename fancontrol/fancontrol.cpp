@@ -21,10 +21,6 @@
 #include "sysinfoapi.h"
 
 
-DEFINE_GUID(GUID_LIDSWITCH_STATE_CHANGE,
-    0xba3e0f4d, 0xb817, 0x4094,
-    0xa2, 0xd1, 0xd5, 0x63, 0x79, 0xe6, 0xa0, 0xf3);
-
 //-------------------------------------------------------------------------
 //  constructor
 //-------------------------------------------------------------------------
@@ -400,7 +396,6 @@ FANCONTROL::FANCONTROL(HINSTANCE hinstapp)
 		_itoa_s(this->ManFanSpeed, buf, 10);
 
 		::SetDlgItemText(this->hwndDialog, 8310, buf);
-		this->hPowerNotify = RegisterPowerSettingNotification(this->hwndDialog, &GUID_LIDSWITCH_STATE_CHANGE, DEVICE_NOTIFY_WINDOW_HANDLE);
 	}
 
 	if (SlimDialog == 1) {
@@ -490,6 +485,7 @@ FANCONTROL::FANCONTROL(HINSTANCE hinstapp)
 	this->CurrentMode = this->ActiveMode;
 
 	this->ModeToDialog(this->CurrentMode);
+	this->RefreshStartupCheckbox();
 
 	this->PreviousMode = 1;
 
@@ -544,7 +540,6 @@ FANCONTROL::~FANCONTROL() {
 		delete[] ppTbTextIcon;
 		ppTbTextIcon = NULL;
 	}
-	UnregisterPowerSettingNotification(this->hPowerNotify);
 	if (this->hwndDialog)
 		::DestroyWindow(this->hwndDialog);
 
@@ -1170,6 +1165,11 @@ FANCONTROL::DlgProc(HWND
 		{
 			int cmd = LOWORD(mp1);
 
+			if (cmd == 8400 && HIWORD(mp1) == BN_CLICKED) {
+				this->SetStartupFromCheckbox();
+				break;
+			}
+
 			//display temperature list
 
 			char obuf[256] = "", obuf2[128] = "", templist2[512];
@@ -1350,35 +1350,6 @@ FANCONTROL::DlgProc(HWND
 				}
 		}
 		break;
-
-	case WM_POWERBROADCAST:
-		if (mp1 == PBT_POWERSETTINGCHANGE) {
-			POWERBROADCAST_SETTING* pbs = (POWERBROADCAST_SETTING*)mp2;
-			if (pbs->PowerSetting == GUID_LIDSWITCH_STATE_CHANGE) {
-				BYTE state = *(BYTE*)(&pbs->Data);
-				if (state == 0) {  // Lid closed
-					this->isLidClosed = true;
-					this->previousModeBeforeLidClose = this->CurrentMode;
-					this->Trace("Lid closed detected, will close to BIOS mode.");
-					this->ModeToDialog(1);
-					ok = this->SetFan("Lid close, Switch to BIOS Mode", 0x80);
-					if (ok) {
-						this->Trace("Set to BIOS Mode");
-						::Sleep(1000);
-					}
-				}
-				else { // Lid opened
-					if (this->isLidClosed) {
-						// switch back to previous mode
-						this->ModeToDialog(this->previousModeBeforeLidClose);
-					}
-					this->isLidClosed = false;
-					this->Trace("Lid opened detected.");
-				}
-			}
-		}
-		break;
-
 
 	case WM_CLOSE:
 		//if (this->MinimizeOnClose && (this->MinimizeToSysTray || this->Runs_as_service))   // 0.24 new:  || this->Runs_as_service)

@@ -2,6 +2,54 @@
 
 ThinkPad Fan Control 2, a fan control utility for ThinkPad users running Windows 10/11
 
+## Fork provenance and AI authorship
+
+This repository is a fork of [Shuzhengz/TPFanCtrl2](https://github.com/Shuzhengz/TPFanCtrl2).
+The changes described below were made by **OpenAI Codex, an AI coding assistant**,
+at the request of the fork owner. The upstream project and its contributors
+retain credit for the original software and its history.
+
+## Changes in this fork
+
+- Preserve the selected BIOS, Smart, or Manual mode across lid changes.
+- Add an **Enable on startup** checkbox in the normal and compact windows. It
+  manages a per-user Windows logon task with administrator privileges.
+- Update the main application's Windows target to Windows 10/11 so the startup
+  implementation builds with the current Windows SDK.
+
+### Preserve mode across lid changes
+
+This checkout does not subscribe to lid-switch notifications or change fan-control
+mode when the lid opens or closes. The selected BIOS, Smart, or Manual mode is
+preserved, including when starting the application with the lid already closed.
+Existing temperature, read-error, and shutdown safeguards remain in place.
+Windows sleep can still suspend the application; this change does not keep it
+running during sleep.
+
+Build the modified source using the instructions below. To verify on hardware,
+configure Windows to remain awake when closing the lid, select Smart or Manual,
+and check that closing and reopening the lid preserves that selection and fan
+control. Also check startup with the lid closed and changing modes while closed.
+
+## Testing: one device only
+
+**This fork has been tested on only one physical device:** a **Lenovo ThinkPad
+P16 Gen 2**, machine model **21FACTO1WW**, running Windows 11. Compatibility with
+other devices has not been validated for these modifications; upstream support
+lists do not establish testing of this fork on those models.
+
+The main application and both tray helpers built successfully in Release/Win32
+using Visual Studio 2022 Build Tools and Windows SDK 10.0.26100. The modified app
+was installed and run on that laptop. Runtime checks confirmed temperature and
+both fan-speed readings, a successful fan-control write, and the startup checkbox.
+A ready per-user startup task was verified to point to the installed executable
+with administrator privileges.
+
+Physical lid-close/open behavior, an actual Windows sign-in launch, the complete
+startup enable/disable cycle, and sleep/resume behavior have **not** been verified.
+Windows sleep can suspend the app even though lid changes no longer select BIOS
+mode. These checks should not be interpreted as comprehensive hardware validation.
+
 ## About
 
 This is a fork of the [original TPFC](https://github.com/ThinkPad-Forum/TPFanControl/tree/master/fancontrol), and is based on 
@@ -95,25 +143,27 @@ If you get Linker Tools Error LNK2026: module unsafe for SAFESEH image when buil
 - Go to Project properties -> Configuration Properties -> Linker -> Advanced
 - Disable option `Image has Safe Exception Handlers` (No (/SAFESEH:NO)
 
-## Running at startup (Not Recommended)
+## Running at startup
 
-You can choose to run TPFC at startup:
+Select **Enable on startup** in the application window to launch TPFanControl
+when the current Windows user signs in. The checkbox is available in both the
+normal and compact windows and reflects the saved Windows startup task.
 
-- Right-click on fancontrol.exe and select copy
-- Press Windows-r or search for run in the start menu
-- Type `shell:startup` in the run box
-- Right click in the window that opens and select paste shortcut
+Enabling creates or updates a per-user scheduled task with administrator
+privileges, without storing a password. Unchecking removes that task without
+closing the current application. Changes take effect immediately; the next
+launch uses `Active=` and `StartMinimized=` from `TPFanControl.ini` as usual.
+The task permits battery operation and has no execution time limit.
 
-Note: This won't start TPFC until you reboot.
+If you move the executable, uncheck and recheck the option from its new location.
+Remove any old Startup-folder shortcut you created manually to avoid duplicate
+startup entries. Failures are shown in a dialog and the application log.
 
 
 ## Uninstall
 
-Delete the folder containing the program and the ini file.
-
-That's it, there's no residual files.
-
-If you added the program to run at startup, you will have to also delete the shortcut from the start up folder.
+Uncheck **Enable on startup**, exit the application, then delete its folder.
+Also remove any Startup-folder shortcut you previously created manually.
 
 ## Known Issues
 
